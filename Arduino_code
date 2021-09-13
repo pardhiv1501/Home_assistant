@@ -1,0 +1,221 @@
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+#ifdef ENABLE_DEBUG
+       #define DEBUG_ESP_PORT Serial
+       #define NODEBUG_WEBSOCKETS
+       #define NDEBUG
+#endif 
+
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include "SinricPro.h"
+#include "SinricProSwitch.h"
+#include <WiFiManager.h>
+
+#include <map>
+
+
+
+#define APP_KEY           "f75bbda5-6f7a-4799-bb8e-c3d4ac27fbf4"      // Should look like "de0bxxxx-1x3x-4x3x-ax2x-5dabxxxxxxxx"
+#define APP_SECRET        "5e496e78-83b2-4b79-94c6-fc4bb89a3002-55ed1421-7056-4126-915e-c5e6f9ecc072"   // Should look like "5f36xxxx-x3x7-4x3x-xexe-e86724a9xxxx-4c4axxxx-3x3x-x5xe-x9x3-333d65xxxxxx"
+
+
+#define device_ID_1   "60c385582a231603cf26aa99"
+#define device_ID_2   "60c385788cf8a303b939d368"
+
+// define the GPIO connected with Relays and switches
+#define RelayPin1 D0  
+#define RelayPin2 D3  
+
+
+
+#define SwitchPin1 D5
+#define SwitchPin2 D6
+
+
+#define wifiLed   D8   //D0
+
+// comment the following line if you use a toggle switches instead of tactile buttons
+//#define TACTILE_BUTTON 1
+
+#define BAUD_RATE   9600
+
+#define DEBOUNCE_TIME 250
+
+typedef struct {      // struct for the std::map below
+  int relayPIN;
+  int flipSwitchPIN;
+} deviceConfig_t;
+
+
+// this is the main configuration
+// please put in your deviceId, the PIN for Relay and PIN for flipSwitch
+// this can be up to N devices...depending on how much pins are available on your device
+std::map<String, deviceConfig_t> devices = {
+    //{deviceId, {relayPIN,  flipSwitchPIN}}
+    {device_ID_1, {  RelayPin1, SwitchPin1 }},
+    {device_ID_2, {  RelayPin2, SwitchPin2 }}
+           
+};
+
+typedef struct {      // struct for the std::map below
+  String deviceId;
+  bool lastFlipSwitchState;
+  unsigned long lastFlipSwitchChange;
+} flipSwitchConfig_t;
+
+std::map<int, flipSwitchConfig_t> flipSwitches;    // this map is used to map flipSwitch PINs to deviceId and handling debounce and last flipSwitch state checks
+                                                  // it will be setup in "setupFlipSwitches" function, using informations from devices map
+
+void setupRelays() { 
+  for (auto &device : devices) {           // for each device (relay, flipSwitch combination)
+    int relayPIN = device.second.relayPIN; // get the relay pin
+    pinMode(relayPIN, OUTPUT);             // set relay pin to OUTPUT
+    digitalWrite(relayPIN, HIGH);
+  }
+}
+
+void setupFlipSwitches() {
+  for (auto &device : devices)  {                     // for each device (relay / flipSwitch combination)
+    flipSwitchConfig_t flipSwitchConfig;              // create a new flipSwitch configuration
+
+    flipSwitchConfig.deviceId = device.first;         // set the deviceId
+    flipSwitchConfig.lastFlipSwitchChange = 0;        // set debounce time
+    flipSwitchConfig.lastFlipSwitchState = true;     // set lastFlipSwitchState to false (LOW)--
+
+    int flipSwitchPIN = device.second.flipSwitchPIN;  // get the flipSwitchPIN
+
+    flipSwitches[flipSwitchPIN] = flipSwitchConfig;   // save the flipSwitch config to flipSwitches map
+    pinMode(flipSwitchPIN, INPUT_PULLUP);                   // set the flipSwitch pin to INPUT
+  }
+}
+
+bool onPowerState(String deviceId, bool &state)
+{
+  Serial.printf("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
+  int relayPIN = devices[deviceId].relayPIN; // get the relay pin for corresponding device
+  digitalWrite(relayPIN, !state);             // set the new relay state
+  
+  lcd.setCursor(0,0);
+  lcd.print("L1");
+  lcd.setCursor(5,0);
+  lcd.print("L2");
+
+  if(deviceId=="60c385582a231603cf26aa99"){
+  
+   
+  lcd.setCursor(0,1);
+  if(state==1){
+  lcd.setCursor(0,1);
+  lcd.print("   ");
+  lcd.setCursor(0,1);
+  lcd.print("ON");
+    }
+  else{
+     lcd.print("OFF");
+    }
+ 
+    }
+ if(deviceId=="60c385788cf8a303b939d368"){
+
+  
+  lcd.setCursor(5,1);
+  if(state==1){
+     lcd.setCursor(5,1);
+  lcd.print("   ");
+  lcd.setCursor(5,1);
+  lcd.print("ON");
+    }
+  else{
+     lcd.print("OFF");
+    }
+    }
+ 
+  return true;
+}
+
+void handleFlipSwitches() {
+  unsigned long actualMillis = millis();                                          // get actual millis
+  for (auto &flipSwitch : flipSwitches) {                                         // for each flipSwitch in flipSwitches map
+    unsigned long lastFlipSwitchChange = flipSwitch.second.lastFlipSwitchChange;  // get the timestamp when flipSwitch was pressed last time (used to debounce / limit events)
+   
+    if (actualMillis - lastFlipSwitchChange > DEBOUNCE_TIME) {                    // if time is > debounce time...
+
+      int flipSwitchPIN = flipSwitch.first;                                       // get the flipSwitch pin from configuration
+      bool lastFlipSwitchState = flipSwitch.second.lastFlipSwitchState;           // get the lastFlipSwitchState
+      bool flipSwitchState = digitalRead(flipSwitchPIN);                          // read the current flipSwitch state
+
+      if (flipSwitchState != lastFlipSwitchState) {                               // if the flipSwitchState has changed...
+#ifdef TACTILE_BUTTON
+        if (flipSwitchState) {                                                    // if the tactile button is pressed 
+#endif      
+          flipSwitch.second.lastFlipSwitchChange = actualMillis;                  // update lastFlipSwitchChange time
+          String deviceId = flipSwitch.second.deviceId;                           // get the deviceId from config
+          int relayPIN = devices[deviceId].relayPIN;                              // get the relayPIN from config
+          bool newRelayState = !digitalRead(relayPIN);                            // set the new relay State
+          digitalWrite(relayPIN, newRelayState);                                  // set the trelay to the new state
+
+          SinricProSwitch &mySwitch = SinricPro[deviceId];                        // get Switch device from SinricPro
+          mySwitch.sendPowerStateEvent(!newRelayState);                            // send the event
+#ifdef TACTILE_BUTTON
+        }
+#endif      
+        flipSwitch.second.lastFlipSwitchState = flipSwitchState;                  // update lastFlipSwitchState
+      }
+    }
+  }
+}
+
+void setupWiFi()
+{
+  digitalWrite(wifiLed, HIGH);
+  WiFiManager wifimanager;
+  Serial.println("Connecting to....");
+  wifimanager.autoConnect("My GoogleHome","123456789");
+  Serial.println("connected");
+  
+  digitalWrite(wifiLed, HIGH);
+  Serial.printf("connected!\r\n[WiFi]: IP-Address is %s\r\n", WiFi.localIP().toString().c_str());
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WIFI Connected");
+  lcd.clear();
+}
+
+void setupSinricPro()
+{
+  for (auto &device : devices)
+  {
+    const char *deviceId = device.first.c_str();
+    SinricProSwitch &mySwitch = SinricPro[deviceId];
+    mySwitch.onPowerState(onPowerState);
+  }
+
+  SinricPro.begin(APP_KEY, APP_SECRET);
+  SinricPro.restoreDeviceStates(true);
+}
+
+void setup()
+{
+  Serial.begin(BAUD_RATE);
+  lcd.begin();   // initializing the LCD
+  lcd.backlight(); // Enable or Turn On the backlight 
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Starting Device");
+  delay(1000);
+  pinMode(wifiLed, OUTPUT);
+  digitalWrite(wifiLed, HIGH);
+
+  setupRelays();
+  setupFlipSwitches();
+  setupWiFi();
+  setupSinricPro();
+}
+
+void loop()
+{
+  SinricPro.handle();
+  handleFlipSwitches();
+}
